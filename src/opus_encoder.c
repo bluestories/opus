@@ -2192,6 +2192,65 @@ opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_
     return ret;
 }
 
+// add by xavier @ 2018 - 10 - 26
+opus_int32 opus_encode_analysis_native(OpusEncoder *st, const opus_val16 *pcm, int frame_size,
+                float* activity, float* prob, int lsb_depth,
+                const void *analysis_pcm, opus_int32 analysis_size,float* fft, int c1, int c2,
+                int analysis_channels, downmix_func downmix, int float_api)
+{
+    CELTEncoder *celt_enc;
+    const CELTMode *celt_mode;
+#ifndef DISABLE_FLOAT_API
+    AnalysisInfo analysis_info;
+    int analysis_read_pos_bak=-1;
+    int analysis_read_subframe_bak=-1;
+    int is_silence = 0;
+#endif
+
+	lsb_depth = IMIN(lsb_depth, st->lsb_depth);
+
+    celt_enc = (CELTEncoder*)((char*)st+st->celt_enc_offset);
+    celt_encoder_ctl(celt_enc, CELT_GET_MODE(&celt_mode));
+
+#ifndef DISABLE_FLOAT_API
+    analysis_info.valid = 0;
+#ifdef FIXED_POINT
+    if (st->silk_mode.complexity >= 10 && st->Fs>=16000)
+#else
+    if (st->silk_mode.complexity >= 7 && st->Fs>=16000)
+#endif
+    {
+		if (is_digital_silence(pcm, frame_size, st->channels, lsb_depth))
+		{
+			is_silence = 1;
+
+			*activity = 0.0;
+			*prob = 0.0;
+		}
+		else
+		{
+			analysis_read_pos_bak = st->analysis.read_pos;
+			analysis_read_subframe_bak = st->analysis.read_subframe;
+			run_analysis(&st->analysis, celt_mode, analysis_pcm, analysis_size, frame_size,fft,
+				c1, c2, analysis_channels, st->Fs,
+				lsb_depth, downmix, &analysis_info);
+
+			*activity = analysis_info.activity_probability;
+			*prob = analysis_info.music_prob;
+		}
+    }
+#else
+    (void)analysis_pcm;
+    (void)analysis_size;
+    (void)c1;
+    (void)c2;
+    (void)analysis_channels;
+    (void)downmix;
+#endif
+
+	return OPUS_OK;
+}
+
 #ifdef FIXED_POINT
 
 #ifndef DISABLE_FLOAT_API
@@ -2253,6 +2312,33 @@ opus_int32 opus_encode(OpusEncoder *st, const opus_int16 *pcm, int analysis_fram
    RESTORE_STACK;
    return ret;
 }
+
+// add by xavier @ 2018-10-26
+opus_int32 opus_encode_analysis(OpusEncoder *st, const opus_int16 *pcm, int analysis_frame_size,
+	float *activity, float *prob,float* fft)
+{
+	int i, ret;
+	int frame_size;
+	VARDECL(float, in);
+	ALLOC_STACK;
+
+	frame_size = frame_size_select(analysis_frame_size, st->variable_duration, st->Fs);
+	if (frame_size <= 0)
+	{
+		RESTORE_STACK;
+		return OPUS_BAD_ARG;
+	}
+	ALLOC(in, frame_size*st->channels, float);
+
+	for (i = 0; i<frame_size*st->channels; i++)
+		in[i] = (1.0f / 32768)*pcm[i];
+	ret = opus_encode_analysis_native(st, in, frame_size, activity, prob, 16,
+									pcm, analysis_frame_size,fft, 0, -2, st->channels, downmix_int, 0);
+	RESTORE_STACK;
+	return ret;
+}
+
+
 opus_int32 opus_encode_float(OpusEncoder *st, const float *pcm, int analysis_frame_size,
                       unsigned char *data, opus_int32 out_data_bytes)
 {
